@@ -23,6 +23,14 @@ g_pfnVectors:
     .word 0                /* Reserved */
     .word xPortPendSVHandler   /* PendSV */
     .word xPortSysTickHandler  /* SysTick */
+    
+    /* External Interrupts */
+    .word 0,0,0,0,0,0,0,0  /* 0-7 */
+    .word 0,0,0,0,0,0,0,0  /* 8-15 */
+    .word 0,0,0,0,0,0,0,0  /* 16-23 */
+    .word 0,0,0,0,0,0,0,0  /* 24-31 */
+    .word 0,0,0,0,0        /* 32-36 */
+    .word USART1_IRQHandler /* 37 */
 
 .section .text.Reset_Handler
 .thumb_func
