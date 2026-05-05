@@ -8,7 +8,12 @@
 /* Registers */
 #define RCC_AHB1ENR (*(volatile uint32_t*)0x40023830)
 #define RCC_APB2ENR (*(volatile uint32_t*)0x40023844)
+#define RCC_APB1ENR (*(volatile uint32_t*)0x40023840)
 #define RCC_CFGR    (*(volatile uint32_t*)0x40023808)
+
+#define GPIOB_MODER (*(volatile uint32_t*)0x40020400)
+#define GPIOB_OTYPER (*(volatile uint32_t*)0x40020404)
+#define GPIOB_AFRL  (*(volatile uint32_t*)0x40020420)
 
 #define GPIOC_MODER (*(volatile uint32_t*)0x40020800)
 #define GPIOC_ODR   (*(volatile uint32_t*)0x40020814)
@@ -20,6 +25,14 @@
 #define USART1_DR   (*(volatile uint32_t*)0x40011004)
 #define USART1_BRR  (*(volatile uint32_t*)0x40011008)
 #define USART1_CR1  (*(volatile uint32_t*)0x4001100C)
+
+#define I2C1_CR1    (*(volatile uint32_t*)0x40005400)
+#define I2C1_CR2    (*(volatile uint32_t*)0x40005404)
+#define I2C1_DR     (*(volatile uint32_t*)0x40005410)
+#define I2C1_SR1    (*(volatile uint32_t*)0x40005414)
+#define I2C1_SR2    (*(volatile uint32_t*)0x40005418)
+#define I2C1_CCR    (*(volatile uint32_t*)0x4000541C)
+#define I2C1_TRISE  (*(volatile uint32_t*)0x40005420)
 
 #define NVIC_ISER1  (*(volatile uint32_t*)0xE000E104)
 
@@ -50,6 +63,14 @@ void uart_print(const char *s) {
         uint8_t c = *s++;
         xQueueSend(uart_q, &c, portMAX_DELAY);
     }
+}
+
+void print_hex(uint8_t n) {
+    const char *hex = "0123456789ABCDEF";
+    uint8_t c1 = hex[(n >> 4) & 0xF];
+    uint8_t c2 = hex[n & 0xF];
+    xQueueSend(uart_q, &c1, portMAX_DELAY);
+    xQueueSend(uart_q, &c2, portMAX_DELAY);
 }
 
 void print_num(int n) {
@@ -83,6 +104,97 @@ void uart_task(void *arg) {
     }
 }
 
+void i2c_init() {
+    /* Enable GPIOB clock */
+    RCC_AHB1ENR |= (1 << 1);
+    
+    /* PB6 SCL AF4, PB7 SDA AF4 */
+    GPIOB_MODER &= ~((3 << (6 * 2)) | (3 << (7 * 2)));
+    GPIOB_MODER |=  ((2 << (6 * 2)) | (2 << (7 * 2)));
+    
+    /* Open-drain */
+    GPIOB_OTYPER |= ((1 << 6) | (1 << 7));
+    
+    /* AF4 for I2C1 */
+    GPIOB_AFRL &= ~((0xF << 24) | (0xF << 28));
+    GPIOB_AFRL |=  ((4 << 24) | (4 << 28));
+    
+    /* Enable I2C1 clock */
+    RCC_APB1ENR |= (1 << 21);
+    
+    /* Reset I2C */
+    I2C1_CR1 |= (1 << 15);
+    I2C1_CR1 &= ~(1 << 15);
+    
+    /* Peripheral clock 16MHz */
+    I2C1_CR2 = 16;
+    
+    /* 100kHz standard mode */
+    I2C1_CCR = 80;
+    I2C1_TRISE = 17;
+    
+    /* Enable I2C */
+    I2C1_CR1 |= (1 << 0);
+}
+
+void process_i2c_detect() {
+    uart_print("Scanning I2C1 (PB6/PB7)...\r\n");
+    uart_print("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f\r\n");
+    
+    for (uint8_t i = 0; i < 128; i += 16) {
+        print_hex(i);
+        uart_print(":");
+        for (uint8_t j = 0; j < 16; j++) {
+            uint8_t addr = i + j;
+            if (addr == 0 || addr > 127) {
+                uart_print("   ");
+                continue;
+            }
+            
+            /* Wait for bus not busy */
+            int timeout = 1000;
+            while ((I2C1_SR2 & (1 << 1)) && timeout--);
+            
+            /* Start */
+            I2C1_CR1 |= (1 << 8);
+            timeout = 1000;
+            while (!(I2C1_SR1 & (1 << 0)) && timeout--);
+            
+            /* Send Address */
+            (void)I2C1_SR1;
+            I2C1_DR = (addr << 1);
+            
+            timeout = 1000;
+            int found = 0;
+            while (timeout--) {
+                uint32_t sr1 = I2C1_SR1;
+                if (sr1 & (1 << 1)) { // ADDR set -> ACK
+                    found = 1;
+                    (void)I2C1_SR1;
+                    (void)I2C1_SR2;
+                    break;
+                }
+                if (sr1 & (1 << 10)) { // AF set -> NACK
+                    I2C1_SR1 &= ~(1 << 10);
+                    break;
+                }
+            }
+            
+            /* Stop */
+            I2C1_CR1 |= (1 << 9);
+            
+            if (found) {
+                uart_print(" ");
+                print_hex(addr);
+            } else {
+                uart_print(" --");
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        uart_print("\r\n");
+    }
+}
+
 void process_cmd(char *cmd) {
     if (strcmp(cmd, "help") == 0) {
         uart_print("Commands:\r\n");
@@ -91,6 +203,7 @@ void process_cmd(char *cmd) {
         uart_print(" blink off      - Disable LED blink\r\n");
         uart_print(" blink freq <ms>- Set blink frequency\r\n");
         uart_print(" clock          - Show clock info\r\n");
+        uart_print(" i2c detect     - Scan I2C1 bus\r\n");
     } else if (strcmp(cmd, "blink on") == 0) {
         blink_enabled = 1;
         uart_print("Blink enabled\r\n");
@@ -122,6 +235,8 @@ void process_cmd(char *cmd) {
             print_num(div);
         }
         uart_print("\r\n");
+    } else if (strcmp(cmd, "i2c detect") == 0) {
+        process_i2c_detect();
     } else if (strlen(cmd) > 0) {
         uart_print("Unknown cmd: ");
         uart_print(cmd);
@@ -207,6 +322,7 @@ void uart_init() {
 int main(void) {
     gpio_init();
     uart_init();
+    i2c_init();
 
     uart_q = xQueueCreate(64, sizeof(uint8_t));
     rx_q   = xQueueCreate(64, sizeof(uint8_t));
